@@ -31,70 +31,106 @@ def user_profile(request, user_id):
 
 def user_list(request):
     skill_name = request.GET.get('skill', '').strip()
-    participants = User.objects.all()
-    
+    participants_qs = User.objects.all().order_by('id')
+
     if skill_name:
-        participants = participants.filter(
-            user_skills__skill__name__iexact=skill_name
+        participants_qs = participants_qs.filter(
+            skills__name__iexact=skill_name
         ).distinct()
-    
-    page_obj = get_page_object(participants.order_by('-date_joined'), request)
-    
+
+    page_obj = get_page_object(participants_qs, request)
+
     context = {
-        'page_obj': page_obj,
+        'participants': page_obj,
+        'all_skills': Skill.objects.all().order_by('name'),
         'active_skill': skill_name,
-        'skills': Skill.objects.all().order_by('name'),
     }
     return render(request, 'users/participants.html', context)
 
 
-@login_required
 @require_http_methods(["GET"])
 def search_skills(request):
+    """Autocomplete endpoint for skills.
+
+    Returns a JSON list of up to 10 skills that start with the query (case-insensitive),
+    ordered alphabetically.
+    Format: [ {"id": <id>, "name": "<name>"}, ... ]
+    """
     query = request.GET.get("q", "").strip()
-    if len(query) < 2:
-        skills = Skill.objects.none()
-    else:
-        skills = Skill.objects.filter(name__icontains=query)[:SKILLS_AMOUNT]
-    data = {"skills": list(skills.values("id", "name"))}
-    return JsonResponse(data)
+    if len(query) < 1:
+        return JsonResponse([], safe=False)
+
+    skills = Skill.objects.filter(name__istartswith=query).order_by('name')[:SKILLS_AMOUNT]
+    data = list(skills.values("id", "name"))
+    return JsonResponse(data, safe=False)
 
 
-@login_required
 @require_http_methods(["POST"])
-def add_skill(request):
-    try:
-        data = json.loads(request.body)
-    except json.JSONDecodeError:
-        return JsonResponse({"error": "Неверный формат данных"}, status=HTTPStatus.BAD_REQUEST)
+@login_required
+def add_skill(request, user_id):
+    """Add a skill to a user (owner only).
 
-    skill_name = data.get("skill_name", "").strip()
-    if not skill_name:
-        return JsonResponse({"error": "Навык не может быть пустым"}, status=HTTPStatus.BAD_REQUEST)
-        
-    if request.user.id != int(data.get("user_id")):
+    Accepts either form-encoded data or JSON with either skill_id or name.
+    Returns JSON: {"skill_id": <id>, "created": <bool>, "added": <bool>}
+    """
+    if request.user.id != user_id:
         return JsonResponse({"error": "Нельзя добавить навык другому пользователю"}, status=HTTPStatus.FORBIDDEN)
 
-    skill, _ = Skill.objects.get_or_create(name__iexact=skill_name, defaults={"name": skill_name})
-    user_skill, created = UserSkill.objects.get_or_create(user=request.user, skill=skill)
+    # Support JSON body or form data
+    if request.content_type == 'application/json':
+        try:
+            payload = json.loads(request.body)
+        except json.JSONDecodeError:
+            return JsonResponse({"error": "Неверный формат данных"}, status=HTTPStatus.BAD_REQUEST)
+        skill_id = payload.get('skill_id')
+        name = payload.get('name', '').strip()
+    else:
+        skill_id = request.POST.get('skill_id')
+        name = request.POST.get('name', '').strip()
 
-    if not created:
-        return JsonResponse({"error": "Этот навык уже добавлен"}, status=HTTPStatus.BAD_REQUEST)
+    created = False
+    added = False
 
-    return JsonResponse({
-        "success": True,
-        "skill": {"id": skill.id, "name": skill.name, "user_skill_id": user_skill.id}
-    })
+    if skill_id:
+        try:
+            skill = Skill.objects.get(id=skill_id)
+        except Skill.DoesNotExist:
+            return JsonResponse({"error": "Навык не найден"}, status=HTTPStatus.BAD_REQUEST)
+    elif name:
+        # try to find case-insensitively first
+        skill = Skill.objects.filter(name__iexact=name).first()
+        if not skill:
+            skill = Skill.objects.create(name=name)
+            created = True
+    else:
+        return JsonResponse({"error": "skill_id или name обязателен"}, status=HTTPStatus.BAD_REQUEST)
+
+    # link to user via UserSkill if not already
+    user_skill, was_created = UserSkill.objects.get_or_create(user=request.user, skill=skill)
+    if was_created:
+        added = True
+
+    return JsonResponse({"skill_id": skill.id, "created": created, "added": added})
 
 
+@require_http_methods(["POST"])
 @login_required
-@require_http_methods(["DELETE"])
-def remove_skill(request, user_skill_id):
-    user_skill = get_object_or_404(UserSkill, id=user_skill_id)
-    if user_skill.user != request.user:
+def remove_skill(request, user_id, skill_id):
+    """Remove a skill from a user (owner only).
+
+    Endpoint: POST /users/<user_id>/skills/<skill_id>/remove/
+    Returns: {"removed": true}
+    """
+    if request.user.id != user_id:
         return JsonResponse({"error": "Нельзя удалить навык другого пользователя"}, status=HTTPStatus.FORBIDDEN)
+
+    skill = get_object_or_404(Skill, id=skill_id)
+    user_skill = UserSkill.objects.filter(user=request.user, skill=skill).first()
+    if not user_skill:
+        return JsonResponse({"error": "Навык не привязан к пользователю"}, status=HTTPStatus.BAD_REQUEST)
+
     user_skill.delete()
-    return JsonResponse({"success": True})
+    return JsonResponse({"removed": True})
 
 
 def register_view(request):
@@ -102,9 +138,10 @@ def register_view(request):
         form = RegistrationForm(request.POST)
         if form.is_valid():
             user = form.save()
-            login_user = authenticate(username=user.username, password=form.cleaned_data["password"])
-            if login_user:
-                login(request, login_user)
+            # auto-login
+            authenticated = authenticate(username=user.username, password=form.cleaned_data["password"])
+            if authenticated:
+                login(request, authenticated)
                 return redirect("projects:project_list")
             return redirect("login")
         else:
