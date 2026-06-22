@@ -7,10 +7,10 @@ class User(AbstractUser):
         "Аватар", upload_to="users/avatars/", blank=True, null=True
     )
 
-    name = models.CharField("Имя", max_length=150, blank=True, default="")
-    surname = models.CharField("Фамилия", max_length=150, blank=True, default="")
+    name = models.CharField("Имя", max_length=124, blank=False, default="")
+    surname = models.CharField("Фамилия", max_length=124, blank=False, default="")
     about = models.TextField("О себе", blank=True, default="")
-    phone = models.CharField("Телефон", max_length=20, blank=True, default="")
+    phone = models.CharField("Телефон", max_length=12, blank=False, default="")
     github_url = models.URLField("GitHub", blank=True, default="")
 
     # Оставляем стандартные поля, но переопределяем related_name, чтобы не было ошибок
@@ -21,6 +21,9 @@ class User(AbstractUser):
         "auth.Permission", related_name="custom_user_permission_set", blank=True
     )
 
+    # Навыки: ManyToMany через промежуточную модель UserSkill
+    # определена ниже
+    
     class Meta:
         verbose_name = "Пользователь"
         verbose_name_plural = "Пользователи"
@@ -32,7 +35,7 @@ class User(AbstractUser):
 class Skill(models.Model):
     """Навык (уникальное название)"""
 
-    name = models.CharField("Название навыка", max_length=100, unique=True)
+    name = models.CharField("Название навыка", max_length=124, unique=True)
 
     class Meta:
         ordering = ["name"]
